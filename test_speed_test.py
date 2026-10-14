@@ -17,10 +17,14 @@ class SpeedTests(unittest.TestCase):
     def test_default_and_custom_count(self):
         for arguments, expected in (([], 10), (["--count", "3"], 3)):
             with self.subTest(count=expected), patch(
-                "speed_test.measure", return_value=(125_000, 1.0)
-            ) as measure, contextlib.redirect_stdout(io.StringIO()):
+                "speed_test.SpeedTester"
+            ) as tester, contextlib.redirect_stdout(io.StringIO()):
+                tester.return_value.measure.return_value = speed_test.MeasurementResult(
+                    expected, 125_000, 1.0
+                )
                 self.assertEqual(speed_test.main(["https://example.com/file", *arguments]), 0)
-                measure.assert_called_once_with("https://example.com/file", expected)
+                tester.assert_called_once_with("https://example.com/file", expected)
+                tester.return_value.measure.assert_called_once()
 
     def test_invalid_arguments_do_not_send_requests(self):
         cases = [
@@ -80,11 +84,16 @@ class SpeedTests(unittest.TestCase):
         for error in (requests.Timeout("timeout"), ProtocolError("truncated")):
             output, errors = io.StringIO(), io.StringIO()
             with self.subTest(error=error), patch(
-                "speed_test.measure", side_effect=error
+                "speed_test.SpeedTester.measure", side_effect=error
             ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                 self.assertEqual(speed_test.main(["https://example.com"]), 1)
             self.assertNotIn("Скорость:", output.getvalue())
             self.assertIn("Ошибка загрузки:", errors.getvalue())
+
+    def test_measurement_result_metrics(self):
+        result = speed_test.MeasurementResult(2, 20_000_000, 5.0)
+        self.assertEqual(result.average_seconds, 2.5)
+        self.assertEqual(result.speed_mbps, 32.0)
 
 
 class LocalHTTPTests(unittest.TestCase):
@@ -148,11 +157,14 @@ class LocalHTTPTests(unittest.TestCase):
             ("/redirect", len(self.payload)),
             ("/slow", len(self.payload)),
         ):
-            with self.subTest(path=path), contextlib.redirect_stdout(io.StringIO()):
-                downloaded, seconds = speed_test.measure(self.url + path, 1)
-            self.assertEqual(downloaded, expected)
+            output = io.StringIO()
+            with self.subTest(path=path), contextlib.redirect_stdout(output):
+                result = speed_test.SpeedTester(self.url + path, 1).measure()
+            self.assertEqual(result.total_bytes, expected)
+            self.assertEqual(result.request_count, 1)
+            self.assertEqual(output.getvalue(), "")
             if path == "/slow":
-                self.assertGreaterEqual(seconds, 0.09)
+                self.assertGreaterEqual(result.total_seconds, 0.09)
 
     def test_http_error_and_truncated_body_stop_the_run(self):
         for path in ("/error", "/truncated"):
